@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import asyncio
 import aiohttp
 import discord
@@ -43,11 +42,14 @@ ROLE_CM = 1550248011085512705         # Rôle CM
 # URL d'achat du produit
 URL_ACHAT = "https://k4lyx-gen.mysellauth.com/product/gen-account"
 
-# Fichiers JSON
+# Fichiers JSON (uniquement pour les rôles/perms, les stats sont en mémoire)
 ROLES_FILE = "active_roles.json"
-STATS_FILE = "gen_stats.json"
 PERMS_STATE_FILE = "perms_state.json"
 CM_PERMS_FILE = "cm_perms.json"
+
+# Stockage des statistiques en mémoire (depuis le lancement)
+# Format : { user_id: { "total": x, "services": { "netflix": y, ... } } }
+gen_stats = {}
 
 # Clé API SellAuth
 SELLAUTH_API_KEY = os.getenv("SELLAUTH_API_KEY")
@@ -65,6 +67,22 @@ ALL_SERVICES = [
 gen_cooldowns = {}
 COOLDOWN_SECONDS = 5  # Valeur par défaut modifiable via /cooldown
 
+def format_service_name(service: str) -> str:
+    mapping = {
+        "epicgames": "Epic Games",
+        "instantgaming": "Instant Gaming",
+        "starpets": "StarPets",
+        "basicfit": "Basic-Fit",
+        "riotgames": "Riot Games",
+        "onoff": "On/Off",
+        "mulvaldvpn": "Mulvald VPN",
+        "spotify": "Spotify",
+        "netflix": "Netflix",
+        "deezer": "Deezer",
+        "betterplayerwin": "BetterPlayerWin"
+    }
+    return mapping.get(service, service.capitalize())
+
 def is_owner_user(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
@@ -74,7 +92,7 @@ def is_owner_user(interaction: discord.Interaction) -> bool:
         return any(role.id == OWNER_ROLE_ID for role in interaction.user.roles)
     return False
 
-# --- GESTION JSON ---
+# --- GESTION JSON (Pour permissions uniquement) ---
 def load_json_file(file_path):
     if os.path.exists(file_path):
         try:
@@ -88,11 +106,17 @@ def save_json_file(file_path, data):
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-def increment_gen_stat(user_id: int):
-    stats = load_json_file(STATS_FILE)
-    user_str = str(user_id)
-    stats[user_str] = stats.get(user_str, 0) + 1
-    save_json_file(STATS_FILE, stats)
+def increment_gen_stat(user_id: int, service_name: str):
+    global gen_stats
+    if user_id not in gen_stats:
+        gen_stats[user_id] = {
+            "total": 0,
+            "services": {}
+        }
+    
+    gen_stats[user_id]["total"] += 1
+    services_dict = gen_stats[user_id]["services"]
+    services_dict[service_name] = services_dict.get(service_name, 0) + 1
 
 # --- VERIFICATION ACCÈS COMMANDE /GEN ---
 def get_perms_state():
@@ -160,22 +184,6 @@ async def send_no_permission_response(interaction: discord.Interaction):
     else:
         await interaction.response.send_message(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=False)
 
-def format_service_name(service: str) -> str:
-    mapping = {
-        "epicgames": "Epic Games",
-        "instantgaming": "Instant Gaming",
-        "starpets": "StarPets",
-        "basicfit": "Basic-Fit",
-        "riotgames": "Riot Games",
-        "onoff": "On/Off",
-        "mulvaldvpn": "Mulvald VPN",
-        "spotify": "Spotify",
-        "netflix": "Netflix",
-        "deezer": "Deezer",
-        "betterplayerwin": "BetterPlayerWin"
-    }
-    return mapping.get(service, service.capitalize())
-
 # --- MISE À JOUR DU STOCK ---
 async def update_live_stock(client: discord.Client):
     stock_channel = client.get_channel(STOCK_CHANNEL_ID)
@@ -229,8 +237,8 @@ async def update_live_leaderboard(client: discord.Client):
     if not lb_channel:
         return
 
-    stats = load_json_file(STATS_FILE)
-    sorted_stats = sorted(stats.items(), key=lambda item: item[1], reverse=True)[:10]
+    formatted_stats = [(uid, data.get("total", 0)) for uid, data in gen_stats.items()]
+    sorted_stats = sorted(formatted_stats, key=lambda item: item[1], reverse=True)[:10]
 
     embed = discord.Embed(
         title="🏆 ─── [ CLASSEMENT DES GÉNÉRATIONS ] ─── 🏆",
@@ -243,9 +251,9 @@ async def update_live_leaderboard(client: discord.Client):
     else:
         lb_lines = []
         medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        for index, (user_id_str, count) in enumerate(sorted_stats):
+        for index, (user_id, count) in enumerate(sorted_stats):
             medal = medals[index] if index < len(medals) else f"`{index+1}.`"
-            lb_lines.append(f"{medal} <@{user_id_str}> ➔ **{count}** génération(s)")
+            lb_lines.append(f"{medal} <@{user_id}> ➔ **{count}** génération(s)")
         
         embed.add_field(name="📊 **TOP 10 DES GENS**", value="\n".join(lb_lines), inline=False)
 
@@ -445,7 +453,6 @@ class AccountCopyView(discord.ui.View):
 
         current_time = time.time()
         if not is_owner_user(interaction):
-            # Récupérer le cooldown spécifique du CM s'il en a un
             cd = COOLDOWN_SECONDS
             if any(role.id == ROLE_CM for role in interaction.user.roles):
                 cm_data = load_cm_perms_data()
@@ -468,7 +475,7 @@ class AccountCopyView(discord.ui.View):
             for line in lines[1:]:
                 f.write(line + "\n")
 
-        increment_gen_stat(interaction.user.id)
+        increment_gen_stat(interaction.user.id, self.service_name)
         await update_live_leaderboard(interaction.client)
 
         remaining_count = len(lines) - 1
@@ -508,7 +515,7 @@ class GenSelect(discord.ui.Select):
             "roblox": "🟥",
             "instantgaming": "⚡",
             "steam": "💙",
-            "basicfit": "🏋️‍♂️️",
+            "basicfit": "🏋️‍♂",
             "riotgames": "⚔️",
             "onoff": "📱",
             "mulvaldvpn": "🔒",
@@ -518,7 +525,6 @@ class GenSelect(discord.ui.Select):
             "betterplayerwin": "💻"
         }
 
-        # Si c'est un CM, on peut filtrer optionnellement ou laisser tout voir mais bloquer au clic
         for service in ALL_SERVICES:
             filename = f"stock_{service}.txt"
             count = 0
@@ -577,7 +583,7 @@ class GenSelect(discord.ui.Select):
             for line in lines[1:]:
                 f.write(line + "\n")
 
-        increment_gen_stat(interaction.user.id)
+        increment_gen_stat(interaction.user.id, service_name)
         await update_live_leaderboard(interaction.client)
 
         remaining_count = len(lines) - 1
@@ -617,7 +623,7 @@ def build_tuto_pages() -> list:
             "**📋 Ce qu'il te faut :**\n"
             f"• Le rôle <@&{ROLE_ACHETEUR}> (donné après ton achat)\n"
             "• Un salon où tu peux écrire des messages\n\n"
-            "**🗺️️ Le programme :**\n"
+            "**🗺 Le programme :**\n"
             "1️⃣ Lancer la commande\n"
             "2️⃣ Choisir ton service\n"
             "3️⃣ Récupérer tes identifiants\n"
@@ -781,7 +787,7 @@ async def background_leaderboard_update():
 @bot.tree.command(name="gen", description="Générer un compte sur l'un de nos services disponibles")
 async def slash_gen(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="⚙️️｜𝗴𝗲𝗻-𝗮𝗰𝗰𝗼𝘂𝗻𝘁",
+        title="⚙｜𝗴𝗲𝗻-𝗮𝗰𝗰𝗼𝘂𝗻𝘁",
         description="Sélectionnez le service de votre choix dans le menu déroulant ci-dessous pour générer un compte instantanément.",
         color=discord.Color.from_rgb(88, 101, 242)
     )
@@ -790,12 +796,12 @@ async def slash_gen(interaction: discord.Interaction):
 
 @bot.tree.command(name="leaderboard", description="Afficher le classement des membres qui ont le plus généré")
 async def slash_leaderboard(interaction: discord.Interaction):
-    stats = load_json_file(STATS_FILE)
-    sorted_stats = sorted(stats.items(), key=lambda item: item[1], reverse=True)[:10]
+    formatted_stats = [(uid, data.get("total", 0)) for uid, data in gen_stats.items()]
+    sorted_stats = sorted(formatted_stats, key=lambda item: item[1], reverse=True)[:10]
 
     embed = discord.Embed(
         title="🏆 ─── [ CLASSEMENT DES GÉNÉRATIONS ] ─── 🏆",
-        description="Voici le top 10 des membres ayant généré le plus de comptes !\n\n━━━━━━━━━━━━━━━━━━━━━━",
+        description="Voici le top 10 des membres ayant généré le plus de comptes depuis le lancement !\n\n━━━━━━━━━━━━━━━━━━━━━━",
         color=discord.Color.gold()
     )
 
@@ -804,28 +810,41 @@ async def slash_leaderboard(interaction: discord.Interaction):
     else:
         lb_lines = []
         medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        for index, (user_id_str, count) in enumerate(sorted_stats):
+        for index, (user_id, count) in enumerate(sorted_stats):
             medal = medals[index] if index < len(medals) else f"`{index+1}.`"
-            lb_lines.append(f"{medal} <@{user_id_str}> ➔ **{count}** génération(s)")
+            lb_lines.append(f"{medal} <@{user_id}> ➔ **{count}** génération(s)")
         
         embed.add_field(name="📊 **TOP 10 DES GENS**", value="\n".join(lb_lines), inline=False)
 
     embed.set_footer(text="✨ Système de stats officiel", icon_url="https://cdn-icons-png.flaticon.com/512/3112/3112946.png")
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
-@bot.tree.command(name="statsgen", description="Voir combien de comptes un membre a générés")
-@app_commands.describe(pseaudodumec="Le membre dont vous voulez voir les stats")
+@bot.tree.command(name="statsgen", description="Voir en détail ce qu'un membre a généré (total et par service)")
+@app_commands.describe(pseaudodumec="Le membre dont vous voulez voir les stats détaillées")
 async def slash_statsgen(interaction: discord.Interaction, pseaudodumec: discord.Member):
-    stats = load_json_file(STATS_FILE)
-    user_str = str(pseaudodumec.id)
-    count = stats.get(user_str, 0)
+    user_data = gen_stats.get(pseaudodumec.id, {"total": 0, "services": {}})
+    total_count = user_data.get("total", 0)
+    services_dict = user_data.get("services", {})
 
     embed = discord.Embed(
-        title="📊 Statistiques de Génération",
-        description=f"Le membre {pseaudodumec.mention} a généré un total de **{count}** compte(s).",
+        title=f"📊 Statistiques de Génération • {pseaudodumec.display_name}",
+        description=f"👤 **Membre :** {pseaudodumec.mention}\n📦 **Total des générations :** **{total_count}** compte(s)",
         color=discord.Color.from_rgb(88, 101, 242)
     )
     embed.set_thumbnail(url=pseaudodumec.display_avatar.url)
+
+    if not services_dict:
+        embed.add_field(name="🔍 Détail par service", value="*Aucun détail de service enregistré depuis le lancement.*", inline=False)
+    else:
+        sorted_services = sorted(services_dict.items(), key=lambda x: x[1], reverse=True)
+        detail_lines = []
+        for srv, count in sorted_services:
+            formatted_name = format_service_name(srv)
+            detail_lines.append(f"• **{formatted_name}** : ` {count} ` généré(s)")
+        
+        embed.add_field(name="🔍 **Détail par service**", value="\n".join(detail_lines), inline=False)
+
+    embed.set_footer(text="✨ Suivi détaillé des services générés (depuis le lancement)")
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
 @bot.tree.command(name="cooldown", description="Modifier le temps de cooldown global de la commande /gen")
@@ -872,7 +891,7 @@ async def slash_cm_pm(interaction: discord.Interaction, cm: discord.Member, cool
     view = CmConfigView(cm, current_allowed)
 
     embed = discord.Embed(
-        title="⚙️ Configuration des permissions CM",
+        title="⚙️️ Configuration des permissions CM",
         description=f"CM ciblé : {cm.mention}\nCooldown personnel : **{cooldown}s**\n\nSélectionnez ci-dessous les services que ce CM a le droit de générer :",
         color=discord.Color.blue()
     )
