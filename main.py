@@ -47,6 +47,7 @@ URL_ACHAT = "https://k4lyx-gen.mysellauth.com/product/gen-account"
 ROLES_FILE = "active_roles.json"
 STATS_FILE = "gen_stats.json"
 PERMS_STATE_FILE = "perms_state.json"
+CM_PERMS_FILE = "cm_perms.json"
 
 # Clé API SellAuth
 SELLAUTH_API_KEY = os.getenv("SELLAUTH_API_KEY")
@@ -56,10 +57,11 @@ ALL_SERVICES = [
     "eldorado", "eneba", "epicgames", "xbox", 
     "hotmail", "crunchyroll", "start", "starpets", 
     "roblox", "instantgaming", "steam",
-    "basicfit", "riotgames", "onoff", "mulvaldvpn"
+    "basicfit", "riotgames", "onoff", "mulvaldvpn",
+    "spotify", "netflix", "deezer", "betterplayerwin"
 ]
 
-# Dictionnaire pour gérer le cooldown de la commande /gen
+# Dictionnaire pour gérer le cooldown global de la commande /gen (par défaut)
 gen_cooldowns = {}
 COOLDOWN_SECONDS = 5  # Valeur par défaut modifiable via /cooldown
 
@@ -97,14 +99,18 @@ def get_perms_state():
     state = load_json_file(PERMS_STATE_FILE)
     if "acheteur_enabled" not in state:
         state["acheteur_enabled"] = True
-    if "cm_expire_at" not in state:
-        state["cm_expire_at"] = 0
     return state
 
 def set_perms_state(state):
     save_json_file(PERMS_STATE_FILE, state)
 
-def can_user_gen(member: discord.Member) -> bool:
+def load_cm_perms_data():
+    return load_json_file(CM_PERMS_FILE)
+
+def save_cm_perms_data(data):
+    save_json_file(CM_PERMS_FILE, data)
+
+def can_user_gen(member: discord.Member, service_name: str = None) -> bool:
     if any(role.id == OWNER_ROLE_ID for role in member.roles) or member.id == member.guild.owner_id:
         return True
     
@@ -116,9 +122,16 @@ def can_user_gen(member: discord.Member) -> bool:
         return True
 
     has_cm = any(role.id == ROLE_CM for role in member.roles)
-    cm_expire_at = state.get("cm_expire_at", 0)
-    if has_cm and current_time < cm_expire_at:
-        return True
+    if has_cm:
+        cm_data = load_cm_perms_data()
+        user_str = str(member.id)
+        if user_str in cm_data:
+            c_info = cm_data[user_str]
+            if current_time < c_info.get("expire_at", 0):
+                if service_name:
+                    allowed = c_info.get("allowed_services", ALL_SERVICES)
+                    return service_name in allowed
+                return True
 
     return False
 
@@ -136,7 +149,7 @@ async def send_no_permission_response(interaction: discord.Interaction):
     embed = discord.Embed(
         title="❌ Accès Refusé",
         description=(
-            f"Vous n'avez pas la permission d'utiliser la commande `/gen`.\n\n"
+            f"Vous n'avez pas la permission d'utiliser la commande `/gen` (ou pour ce service).\n\n"
             f"Pour obtenir votre accès, achetez le grade ici :\n{URL_ACHAT}"
         ),
         color=discord.Color.red()
@@ -146,6 +159,22 @@ async def send_no_permission_response(interaction: discord.Interaction):
         await interaction.followup.send(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=False)
     else:
         await interaction.response.send_message(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=False)
+
+def format_service_name(service: str) -> str:
+    mapping = {
+        "epicgames": "Epic Games",
+        "instantgaming": "Instant Gaming",
+        "starpets": "StarPets",
+        "basicfit": "Basic-Fit",
+        "riotgames": "Riot Games",
+        "onoff": "On/Off",
+        "mulvaldvpn": "Mulvald VPN",
+        "spotify": "Spotify",
+        "netflix": "Netflix",
+        "deezer": "Deezer",
+        "betterplayerwin": "BetterPlayerWin"
+    }
+    return mapping.get(service, service.capitalize())
 
 # --- MISE À JOUR DU STOCK ---
 async def update_live_stock(client: discord.Client):
@@ -168,15 +197,7 @@ async def update_live_stock(client: discord.Client):
                 count = sum(1 for line in f if line.strip() and ":" in line)
         
         status_icon = "🟢" if count > 0 else "🔴"
-        
-        if service == "epicgames": formatted_name = "Epic Games"
-        elif service == "instantgaming": formatted_name = "Instant Gaming"
-        elif service == "starpets": formatted_name = "StarPets"
-        elif service == "basicfit": formatted_name = "Basic-Fit"
-        elif service == "riotgames": formatted_name = "Riot Games"
-        elif service == "onoff": formatted_name = "OnOff"
-        elif service == "mulvaldvpn": formatted_name = "Mulvald VPN"
-        else: formatted_name = service.capitalize()
+        formatted_name = format_service_name(service)
 
         stock_lines.append(f"{status_icon} **{formatted_name}** ➔ `{count}` disponible(s)")
 
@@ -241,8 +262,9 @@ async def update_live_leaderboard(client: discord.Client):
 # --- MODALS ET VUES PANELS ---
 
 class CmTimeModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Gestion du temps CM")
+    def __init__(self, target_member: discord.Member):
+        super().__init__(title=f"Ajouter du temps à {target_member.name}")
+        self.target_member = target_member
 
         self.time_input = discord.ui.TextInput(
             label="Temps à ajouter (en minutes)",
@@ -266,65 +288,130 @@ class CmTimeModal(discord.ui.Modal):
             await interaction.response.send_message("❌ Entrez un nombre de minutes valide.", ephemeral=True)
             return
 
-        state = get_perms_state()
+        cm_data = load_cm_perms_data()
+        user_str = str(self.target_member.id)
+        if user_str not in cm_data:
+            cm_data[user_str] = {"expire_at": 0, "allowed_services": ALL_SERVICES.copy(), "cooldown": 5}
+
         current_time = time.time()
+        current_expire = cm_data[user_str].get("expire_at", 0)
         
-        if state.get("cm_expire_at", 0) > current_time:
-            new_expire = state["cm_expire_at"] + (minutes * 60)
+        if current_expire > current_time:
+            new_expire = current_expire + (minutes * 60)
         else:
             new_expire = current_time + (minutes * 60)
 
-        state["cm_expire_at"] = new_expire
-        set_perms_state(state)
+        cm_data[user_str]["expire_at"] = new_expire
+        save_cm_perms_data(cm_data)
 
         log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             embed_log = discord.Embed(
                 title="⚙️ Temps CM Ajouté",
-                description=f"👤 **Par :** {interaction.user.mention}\n➕ **Temps ajouté :** `{minutes}` min\n⏳ **Nouvelle expiration :** <t:{int(new_expire)}:R>",
+                description=f"👤 **Par :** {interaction.user.mention}\n🎯 **CM :** {self.target_member.mention}\n➕ **Temps ajouté :** `{minutes}` min\n⏳ **Nouvelle expiration :** <t:{int(new_expire)}:R>",
                 color=discord.Color.blue()
             )
             await log_channel.send(embed=embed_log)
 
         embed = discord.Embed(
             title="✅ Accès CM Mis à Jour",
-            description=f"**{minutes} minute(s)** ont été ajoutées pour le rôle <@&{ROLE_CM}>.\n⏳ **Expiration totale :** <t:{int(new_expire)}:R> (<t:{int(new_expire)}:t>).",
+            description=f"**{minutes} minute(s)** ont été ajoutées pour {self.target_member.mention}.\n⏳ **Expiration totale :** <t:{int(new_expire)}:R> (<t:{int(new_expire)}:t>).",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class CmMemberSelectForTime(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Sélectionnez le CM à qui ajouter du temps...", min_values=1, max_values=1)
+    async def select_cm(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        if not is_owner_user(interaction):
+            await interaction.response.send_message("❌ Réservé au rôle Owner.", ephemeral=True)
+            return
+        target = select.values[0]
+        if isinstance(target, discord.User):
+            target = interaction.guild.get_member(target.id) or target
+        await interaction.response.send_modal(CmTimeModal(target))
 
 
 class CmActionView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="➕ Ajouter du temps", style=discord.ButtonStyle.primary, emoji="⏱️", custom_id="btn_add_time_cm")
+    @discord.ui.button(label="➕ Ajouter du temps à un CM", style=discord.ButtonStyle.primary, emoji="⏱️", custom_id="btn_add_time_cm")
     async def add_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_owner_user(interaction):
             await interaction.response.send_message("❌ Réservé au rôle Owner.", ephemeral=True)
             return
-        await interaction.response.send_modal(CmTimeModal())
+        view = CmMemberSelectForTime()
+        await interaction.response.send_message("Veuillez choisir le CM concerné :", view=view, ephemeral=True)
 
-    @discord.ui.button(label="❌ Annuler le temps / Couper l'accès", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="btn_remove_access_cm")
+    @discord.ui.button(label="❌ Révoquer l'accès d'un CM", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="btn_remove_access_cm")
     async def remove_access_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_owner_user(interaction):
             await interaction.response.send_message("❌ Réservé au rôle Owner.", ephemeral=True)
             return
+        
+        class RemoveCmSelect(discord.ui.View):
+            @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Sélectionnez le CM dont il faut couper l'accès...", min_values=1, max_values=1)
+            async def sel(self, inter: discord.Interaction, sel_item: discord.ui.UserSelect):
+                target = sel_item.values[0]
+                cm_data = load_cm_perms_data()
+                if str(target.id) in cm_data:
+                    cm_data[str(target.id)]["expire_at"] = 0
+                    save_cm_perms_data(cm_data)
+                
+                log_channel = inter.client.get_channel(LOG_CHANNEL_ID)
+                if log_channel:
+                    embed_log = discord.Embed(
+                        title="🔒 Accès CM Révoqué",
+                        description=f"👤 **Par :** {inter.user.mention}\n❌ Accès coupé pour : <@{target.id}>",
+                        color=discord.Color.red()
+                    )
+                    await log_channel.send(embed=embed_log)
+                await inter.response.send_message(f"🔒 **Accès coupé avec succès** pour <@{target.id}>.", ephemeral=True)
 
-        state = get_perms_state()
-        state["cm_expire_at"] = 0
-        set_perms_state(state)
+        await interaction.response.send_message("Choisissez le CM à révoquer :", view=RemoveCmSelect(), ephemeral=True)
 
-        log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            embed_log = discord.Embed(
-                title="🔒 Temps CM Annulé & Accès Révoqué",
-                description=f"👤 **Par :** {interaction.user.mention}\n❌ Le temps restant a été annulé et l'accès au `/gen` pour les CM a été coupé.",
-                color=discord.Color.red()
-            )
-            await log_channel.send(embed=embed_log)
 
-        await interaction.response.send_message("🔒 **Temps CM annulé avec succès.** L'accès au `/gen` est de nouveau fermé pour le rôle CM.", ephemeral=True)
+# --- CONFIGURATION /CM-PM (Services et Cooldown par CM) ---
+class CmServicesSelect(discord.ui.Select):
+    def __init__(self, target_member: discord.Member, current_allowed: list):
+        self.target_member = target_member
+        options = []
+        for service in ALL_SERVICES:
+            formatted_name = format_service_name(service)
+            is_default = service in current_allowed
+            options.append(discord.SelectOption(
+                label=formatted_name, 
+                value=service, 
+                default=is_default,
+                emoji="📦"
+            ))
+        super().__init__(placeholder="Choisissez les services autorisés pour ce CM...", min_values=0, max_values=len(ALL_SERVICES), options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_owner_user(interaction):
+            await interaction.response.send_message("❌ Réservé au rôle Owner.", ephemeral=True)
+            return
+        
+        allowed = self.values
+        cm_data = load_cm_perms_data()
+        user_str = str(self.target_member.id)
+        if user_str not in cm_data:
+            cm_data[user_str] = {"expire_at": 0, "allowed_services": ALL_SERVICES.copy(), "cooldown": 5}
+        
+        cm_data[user_str]["allowed_services"] = allowed
+        save_cm_perms_data(cm_data)
+
+        await interaction.response.send_message(f"✅ Services autorisés mis à jour pour {self.target_member.mention} ({len(allowed)} services sélectionnés).", ephemeral=True)
+
+class CmConfigView(discord.ui.View):
+    def __init__(self, target_member: discord.Member, current_allowed: list):
+        super().__init__(timeout=180)
+        self.add_item(CmServicesSelect(target_member, current_allowed))
 
 
 # --- VUES DE GÉNÉRATION DE COMPTE ---
@@ -339,7 +426,7 @@ class AccountCopyView(discord.ui.View):
 
     @discord.ui.button(label="Générer un autre", style=discord.ButtonStyle.success, emoji="➡️", custom_id="gen_next")
     async def next_account(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if isinstance(interaction.user, discord.Member) and not can_user_gen(interaction.user):
+        if isinstance(interaction.user, discord.Member) and not can_user_gen(interaction.user, self.service_name):
             await send_no_permission_response(interaction)
             return
 
@@ -358,9 +445,16 @@ class AccountCopyView(discord.ui.View):
 
         current_time = time.time()
         if not is_owner_user(interaction):
+            # Récupérer le cooldown spécifique du CM s'il en a un
+            cd = COOLDOWN_SECONDS
+            if any(role.id == ROLE_CM for role in interaction.user.roles):
+                cm_data = load_cm_perms_data()
+                if str(interaction.user.id) in cm_data:
+                    cd = cm_data[str(interaction.user.id)].get("cooldown", COOLDOWN_SECONDS)
+
             last_gen = gen_cooldowns.get(interaction.user.id, 0)
-            if current_time - last_gen < COOLDOWN_SECONDS:
-                remaining = int(COOLDOWN_SECONDS - (current_time - last_gen))
+            if current_time - last_gen < cd:
+                remaining = int(cd - (current_time - last_gen))
                 await interaction.response.send_message(f"⏳ Veuillez patienter **{remaining} seconde(s)** avant de générer un autre compte.", ephemeral=True)
                 return
             gen_cooldowns[interaction.user.id] = current_time
@@ -381,12 +475,7 @@ class AccountCopyView(discord.ui.View):
         if remaining_count % 500 == 0 or remaining_count == 0:
             await update_live_stock(interaction.client)
 
-        if self.service_name == "starpets": display_name = "StarPets"
-        elif self.service_name == "basicfit": display_name = "Basic-Fit"
-        elif self.service_name == "riotgames": display_name = "Riot Games"
-        elif self.service_name == "onoff": display_name = "On/Off"
-        elif self.service_name == "mulvaldvpn": display_name = "Mulvald VPN"
-        else: display_name = self.service_name.capitalize()
+        display_name = format_service_name(self.service_name)
 
         embed = discord.Embed(
             title=f"🎁 Compte {display_name} Généré !",
@@ -404,7 +493,7 @@ class AccountCopyView(discord.ui.View):
         await interaction.message.delete()
 
 class GenSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, user: discord.Member = None):
         options = []
         
         service_emojis = {
@@ -419,12 +508,17 @@ class GenSelect(discord.ui.Select):
             "roblox": "🟥",
             "instantgaming": "⚡",
             "steam": "💙",
-            "basicfit": "🏋️‍♂️",
+            "basicfit": "🏋️‍♂️️",
             "riotgames": "⚔️",
             "onoff": "📱",
-            "mulvaldvpn": "🔒"
+            "mulvaldvpn": "🔒",
+            "spotify": "🎧",
+            "netflix": "🎬",
+            "deezer": "🎵",
+            "betterplayerwin": "💻"
         }
 
+        # Si c'est un CM, on peut filtrer optionnellement ou laisser tout voir mais bloquer au clic
         for service in ALL_SERVICES:
             filename = f"stock_{service}.txt"
             count = 0
@@ -432,26 +526,19 @@ class GenSelect(discord.ui.Select):
                 with open(filename, "r", encoding="utf-8") as f:
                     count = sum(1 for line in f if line.strip() and ":" in line)
             
-            if service == "epicgames": formatted_name = "Epic Games"
-            elif service == "instantgaming": formatted_name = "Instant Gaming"
-            elif service == "starpets": formatted_name = "StarPets"
-            elif service == "basicfit": formatted_name = "Basic-Fit"
-            elif service == "riotgames": formatted_name = "Riot Games"
-            elif service == "onoff": formatted_name = "On/Off"
-            elif service == "mulvaldvpn": formatted_name = "Mulvald VPN"
-            else: formatted_name = service.capitalize()
-
+            formatted_name = format_service_name(service)
             emoji = service_emojis.get(service, "📦")
             options.append(discord.SelectOption(label=f"{formatted_name} ({count} dispo)", value=service, emoji=emoji))
 
         super().__init__(placeholder="💎 Sélectionnez le service...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        if isinstance(interaction.user, discord.Member) and not can_user_gen(interaction.user):
+        service_name = self.values[0]
+
+        if isinstance(interaction.user, discord.Member) and not can_user_gen(interaction.user, service_name):
             await send_no_permission_response(interaction)
             return
 
-        service_name = self.values[0]
         filename = f"stock_{service_name}.txt"
 
         if not os.path.exists(filename):
@@ -468,9 +555,15 @@ class GenSelect(discord.ui.Select):
 
         current_time = time.time()
         if not is_owner_user(interaction):
+            cd = COOLDOWN_SECONDS
+            if any(role.id == ROLE_CM for role in interaction.user.roles):
+                cm_data = load_cm_perms_data()
+                if str(interaction.user.id) in cm_data:
+                    cd = cm_data[str(interaction.user.id)].get("cooldown", COOLDOWN_SECONDS)
+
             last_gen = gen_cooldowns.get(interaction.user.id, 0)
-            if current_time - last_gen < COOLDOWN_SECONDS:
-                remaining = int(COOLDOWN_SECONDS - (current_time - last_gen))
+            if current_time - last_gen < cd:
+                remaining = int(cd - (current_time - last_gen))
                 await interaction.response.send_message(f"⏳ Veuillez patienter **{remaining} seconde(s)** avant de générer un autre compte.", ephemeral=True)
                 return
             gen_cooldowns[interaction.user.id] = current_time
@@ -491,12 +584,7 @@ class GenSelect(discord.ui.Select):
         if remaining_count % 500 == 0 or remaining_count == 0:
             await update_live_stock(interaction.client)
 
-        if service_name == "starpets": display_name = "StarPets"
-        elif service_name == "basicfit": display_name = "Basic-Fit"
-        elif service_name == "riotgames": display_name = "Riot Games"
-        elif service_name == "onoff": display_name = "On/Off"
-        elif service_name == "mulvaldvpn": display_name = "Mulvald VPN"
-        else: display_name = service_name.capitalize()
+        display_name = format_service_name(service_name)
 
         embed = discord.Embed(
             title=f"🎁 Compte {display_name} Généré !",
@@ -511,9 +599,9 @@ class GenSelect(discord.ui.Select):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 class GenView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, user: discord.Member = None):
         super().__init__(timeout=None)
-        self.add_item(GenSelect())
+        self.add_item(GenSelect(user))
 
 
 # --- TUTORIEL /GEN ---
@@ -529,7 +617,7 @@ def build_tuto_pages() -> list:
             "**📋 Ce qu'il te faut :**\n"
             f"• Le rôle <@&{ROLE_ACHETEUR}> (donné après ton achat)\n"
             "• Un salon où tu peux écrire des messages\n\n"
-            "**🗺️ Le programme :**\n"
+            "**🗺️️ Le programme :**\n"
             "1️⃣ Lancer la commande\n"
             "2️⃣ Choisir ton service\n"
             "3️⃣ Récupérer tes identifiants\n"
@@ -693,11 +781,11 @@ async def background_leaderboard_update():
 @bot.tree.command(name="gen", description="Générer un compte sur l'un de nos services disponibles")
 async def slash_gen(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="⚙️｜𝗴𝗲𝗻-𝗮𝗰𝗰𝗼𝘂𝗻𝘁",
+        title="⚙️️｜𝗴𝗲𝗻-𝗮𝗰𝗰𝗼𝘂𝗻𝘁",
         description="Sélectionnez le service de votre choix dans le menu déroulant ci-dessous pour générer un compte instantanément.",
         color=discord.Color.from_rgb(88, 101, 242)
     )
-    view = GenView()
+    view = GenView(interaction.user if isinstance(interaction.user, discord.Member) else None)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
 @bot.tree.command(name="leaderboard", description="Afficher le classement des membres qui ont le plus généré")
@@ -740,7 +828,7 @@ async def slash_statsgen(interaction: discord.Interaction, pseaudodumec: discord
     embed.set_thumbnail(url=pseaudodumec.display_avatar.url)
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
-@bot.tree.command(name="cooldown", description="Modifier le temps de cooldown de la commande /gen")
+@bot.tree.command(name="cooldown", description="Modifier le temps de cooldown global de la commande /gen")
 @app_commands.describe(lechiffre="Le nombre de secondes de cooldown")
 async def slash_cooldown(interaction: discord.Interaction, lechiffre: int):
     global COOLDOWN_SECONDS
@@ -757,20 +845,41 @@ async def slash_cooldown(interaction: discord.Interaction, lechiffre: int):
     log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         embed_log = discord.Embed(
-            title="⏱️ Cooldown Modifié",
+            title="⏱️ Cooldown Global Modifié",
             description=f"👤 **Par :** {interaction.user.mention}\n⏱️ **Nouveau cooldown :** `{lechiffre}` seconde(s)",
             color=discord.Color.blue()
         )
         await log_channel.send(embed=embed_log)
 
-    await interaction.response.send_message(f"✅ Le cooldown de la commande `/gen` a été réglé à **{lechiffre}** seconde(s).", ephemeral=True)
+    await interaction.response.send_message(f"✅ Le cooldown global de la commande `/gen` a été réglé à **{lechiffre}** seconde(s).", ephemeral=True)
 
-@bot.tree.command(name="restock", description="Ajouter un fichier texte pour restock automatiquement un service")
-@app_commands.describe(
-    service="Le service à restock",
-    fichier="Glisse ton fichier .txt contenant les comptes (user:pass)"
-)
-@app_commands.choices(service=[
+@bot.tree.command(name="cm-pm", description="Configurer les services autorisés et le cooldown d'un CM spécifique")
+@app_commands.describe(cm="Le membre CM à configurer", cooldown="Temps de cooldown personnel en secondes")
+async def slash_cm_pm(interaction: discord.Interaction, cm: discord.Member, cooldown: int = 5):
+    if not is_owner_user(interaction):
+        await interaction.response.send_message("❌ Réservé aux administrateurs.", ephemeral=True)
+        return
+
+    cm_data = load_cm_perms_data()
+    user_str = str(cm.id)
+    if user_str not in cm_data:
+        cm_data[user_str] = {"expire_at": 0, "allowed_services": ALL_SERVICES.copy(), "cooldown": cooldown}
+    else:
+        cm_data[user_str]["cooldown"] = cooldown
+    save_cm_perms_data(cm_data)
+
+    current_allowed = cm_data[user_str].get("allowed_services", ALL_SERVICES.copy())
+    view = CmConfigView(cm, current_allowed)
+
+    embed = discord.Embed(
+        title="⚙️ Configuration des permissions CM",
+        description=f"CM ciblé : {cm.mention}\nCooldown personnel : **{cooldown}s**\n\nSélectionnez ci-dessous les services que ce CM a le droit de générer :",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Liste complète des choix de services pour restock / delstock
+RESTOCK_CHOICES = [
     app_commands.Choice(name="Eldorado", value="eldorado"),
     app_commands.Choice(name="Eneba", value="eneba"),
     app_commands.Choice(name="Epic Games", value="epicgames"),
@@ -786,7 +895,18 @@ async def slash_cooldown(interaction: discord.Interaction, lechiffre: int):
     app_commands.Choice(name="Riot Games", value="riotgames"),
     app_commands.Choice(name="On/Off", value="onoff"),
     app_commands.Choice(name="Mulvald VPN", value="mulvaldvpn"),
-])
+    app_commands.Choice(name="Spotify", value="spotify"),
+    app_commands.Choice(name="Netflix", value="netflix"),
+    app_commands.Choice(name="Deezer", value="deezer"),
+    app_commands.Choice(name="BetterPlayerWin", value="betterplayerwin"),
+]
+
+@bot.tree.command(name="restock", description="Ajouter un fichier texte pour restock automatiquement un service")
+@app_commands.describe(
+    service="Le service à restock",
+    fichier="Glisse ton fichier .txt contenant les comptes (user:pass)"
+)
+@app_commands.choices(service=RESTOCK_CHOICES)
 async def slash_restock(interaction: discord.Interaction, service: str, fichier: discord.Attachment):
     if not is_owner_user(interaction):
         await interaction.response.send_message("❌ Réservé aux administrateurs.", ephemeral=True)
@@ -819,14 +939,7 @@ async def slash_restock(interaction: discord.Interaction, service: str, fichier:
     with open(filename, "r", encoding="utf-8") as f:
         total_stock = sum(1 for line in f if line.strip() and ":" in line)
 
-    if service == "starpets": formatted_name = "StarPets"
-    elif service == "epicgames": formatted_name = "Epic Games"
-    elif service == "instantgaming": formatted_name = "Instant Gaming"
-    elif service == "basicfit": formatted_name = "Basic-Fit"
-    elif service == "riotgames": formatted_name = "Riot Games"
-    elif service == "onoff": formatted_name = "On/Off"
-    elif service == "mulvaldvpn": formatted_name = "Mulvald VPN"
-    else: formatted_name = service.capitalize()
+    formatted_name = format_service_name(service)
 
     acheteur_channel = interaction.client.get_channel(ACHETEUR_NOTIF_CHANNEL_ID)
     if acheteur_channel:
@@ -855,23 +968,7 @@ async def slash_restock(interaction: discord.Interaction, service: str, fichier:
     service="Le service dont il faut retirer des comptes",
     nombre="Nombre de comptes à supprimer du haut du stock"
 )
-@app_commands.choices(service=[
-    app_commands.Choice(name="Eldorado", value="eldorado"),
-    app_commands.Choice(name="Eneba", value="eneba"),
-    app_commands.Choice(name="Epic Games", value="epicgames"),
-    app_commands.Choice(name="Xbox", value="xbox"),
-    app_commands.Choice(name="Hotmail", value="hotmail"),
-    app_commands.Choice(name="Crunchyroll", value="crunchyroll"),
-    app_commands.Choice(name="Start", value="start"),
-    app_commands.Choice(name="StarPets", value="starpets"),
-    app_commands.Choice(name="Roblox", value="roblox"),
-    app_commands.Choice(name="Instant Gaming", value="instantgaming"),
-    app_commands.Choice(name="Steam", value="steam"),
-    app_commands.Choice(name="Basic-Fit", value="basicfit"),
-    app_commands.Choice(name="Riot Games", value="riotgames"),
-    app_commands.Choice(name="On/Off", value="onoff"),
-    app_commands.Choice(name="Mulvald VPN", value="mulvaldvpn"),
-])
+@app_commands.choices(service=RESTOCK_CHOICES)
 async def slash_delstock(interaction: discord.Interaction, service: str, nombre: int = 1):
     if not is_owner_user(interaction):
         await interaction.response.send_message("❌ Réservé aux administrateurs.", ephemeral=True)
@@ -898,15 +995,7 @@ async def slash_delstock(interaction: discord.Interaction, service: str, nombre:
         for line in stock:
             f.write(line + "\n")
 
-    if service == "starpets": formatted_name = "StarPets"
-    elif service == "epicgames": formatted_name = "Epic Games"
-    elif service == "instantgaming": formatted_name = "Instant Gaming"
-    elif service == "basicfit": formatted_name = "Basic-Fit"
-    elif service == "riotgames": formatted_name = "Riot Games"
-    elif service == "onoff": formatted_name = "On/Off"
-    elif service == "mulvaldvpn": formatted_name = "Mulvald VPN"
-    else: formatted_name = service.capitalize()
-
+    formatted_name = format_service_name(service)
     await update_live_stock(interaction.client)
 
     await interaction.response.send_message(f"✅ **{nombre}** compte(s) ont été supprimés du service **{formatted_name}**. Stock restant : **{len(stock)}**", ephemeral=True)
@@ -919,7 +1008,7 @@ async def slash_panel_cm(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="⏱️ Gestion de l'accès CM",
-        description="Utilisez les boutons ci-dessous pour ajouter du temps ou annuler/couper immédiatement l'accès au `/gen` pour les CM.",
+        description="Utilisez les boutons ci-dessous pour ajouter du temps (en choisissant le CM concerné) ou révoquer un accès.",
         color=discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, view=CmActionView(), ephemeral=True)
