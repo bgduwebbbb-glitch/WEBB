@@ -48,6 +48,7 @@ PERMS_STATE_FILE = "perms_state.json"
 CM_PERMS_FILE = "cm_perms.json"
 
 # Stockage des statistiques EN MÉMOIRE (depuis le lancement du bot)
+# Format : { user_id: { "total": x, "services": { "netflix": y, ... } } }
 gen_stats = {}
 
 # Clé API SellAuth
@@ -62,6 +63,7 @@ ALL_SERVICES = [
     "spotify", "netflix", "deezer", "betterplayerwin"
 ]
 
+# Dictionnaire pour gérer le cooldown global de la commande /gen (par défaut)
 gen_cooldowns = {}
 COOLDOWN_SECONDS = 5  # Valeur par défaut modifiable via /cooldown
 
@@ -123,6 +125,9 @@ def get_perms_state():
         state["acheteur_enabled"] = True
     return state
 
+def set_perms_state(state):
+    save_json_file(PERMS_STATE_FILE, state)
+
 def load_cm_perms_data():
     return load_json_file(CM_PERMS_FILE)
 
@@ -175,9 +180,9 @@ async def send_no_permission_response(interaction: discord.Interaction):
     )
 
     if interaction.response.is_done():
-        await interaction.followup.send(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=False)
     else:
-        await interaction.response.send_message(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(content=f"{interaction.user.mention}", embed=embed, view=view, ephemeral=False)
 
 # --- MISE À JOUR DU STOCK ---
 async def update_live_stock(client: discord.Client):
@@ -379,6 +384,7 @@ class CmActionView(discord.ui.View):
         await interaction.response.send_message("Choisissez le CM à révoquer :", view=RemoveCmSelect(), ephemeral=True)
 
 
+# --- CONFIGURATION /CM-PM (Services et Cooldown par CM) ---
 class CmServicesSelect(discord.ui.Select):
     def __init__(self, target_member: discord.Member, current_allowed: list):
         self.target_member = target_member
@@ -428,22 +434,20 @@ class AccountCopyView(discord.ui.View):
 
     @discord.ui.button(label="Générer un autre", style=discord.ButtonStyle.success, emoji="➡️", custom_id="gen_next")
     async def next_account(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
         if isinstance(interaction.user, discord.Member) and not can_user_gen(interaction.user, self.service_name):
             await send_no_permission_response(interaction)
             return
 
         filename = f"stock_{self.service_name}.txt"
         if not os.path.exists(filename):
-            await interaction.edit_original_response(content="❌ Stock introuvable.", embed=None, view=None)
+            await interaction.response.edit_message(content="❌ Stock introuvable.", embed=None, view=None)
             return
 
         with open(filename, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f.readlines() if line.strip() and ":" in line]
 
         if not lines:
-            await interaction.edit_original_response(content="❌ Stock épuisé !", embed=None, view=None)
+            await interaction.response.edit_message(content="❌ Stock épuisé !", embed=None, view=None)
             await update_live_stock(interaction.client)
             return
 
@@ -458,7 +462,7 @@ class AccountCopyView(discord.ui.View):
             last_gen = gen_cooldowns.get(interaction.user.id, 0)
             if current_time - last_gen < cd:
                 remaining = int(cd - (current_time - last_gen))
-                await interaction.followup.send(f"⏳ Veuillez patienter **{remaining} seconde(s)** avant de générer un autre compte.", ephemeral=True)
+                await interaction.response.send_message(f"⏳ Veuillez patienter **{remaining} seconde(s)** avant de générer un autre compte.", ephemeral=True)
                 return
             gen_cooldowns[interaction.user.id] = current_time
 
@@ -489,7 +493,7 @@ class AccountCopyView(discord.ui.View):
         embed.add_field(name="🔑 Mot de passe", value=f"```text\n{new_pass}\n```", inline=False)
         embed.set_footer(text=f"Stock restant : {remaining_count} comptes")
         
-        await interaction.edit_original_response(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Fermer", style=discord.ButtonStyle.danger, emoji="✖️", custom_id="gen_close")
     async def close_view(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -535,7 +539,6 @@ class GenSelect(discord.ui.Select):
         super().__init__(placeholder="💎 Sélectionnez le service...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
         service_name = self.values[0]
 
         if isinstance(interaction.user, discord.Member) and not can_user_gen(interaction.user, service_name):
@@ -545,14 +548,14 @@ class GenSelect(discord.ui.Select):
         filename = f"stock_{service_name}.txt"
 
         if not os.path.exists(filename):
-            await interaction.followup.send("❌ Stock introuvable.", ephemeral=True)
+            await interaction.response.send_message("❌ Stock introuvable.", ephemeral=True)
             return
 
         with open(filename, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f.readlines() if line.strip() and ":" in line]
 
         if not lines:
-            await interaction.followup.send("❌ Stock vide !", ephemeral=True)
+            await interaction.response.send_message("❌ Stock vide !", ephemeral=True)
             await update_live_stock(interaction.client)
             return
 
@@ -567,7 +570,7 @@ class GenSelect(discord.ui.Select):
             last_gen = gen_cooldowns.get(interaction.user.id, 0)
             if current_time - last_gen < cd:
                 remaining = int(cd - (current_time - last_gen))
-                await interaction.followup.send(f"⏳ Veuillez patienter **{remaining} seconde(s)** avant de générer un autre compte.", ephemeral=True)
+                await interaction.response.send_message(f"⏳ Veuillez patienter **{remaining} seconde(s)** avant de générer un autre compte.", ephemeral=True)
                 return
             gen_cooldowns[interaction.user.id] = current_time
 
@@ -599,7 +602,7 @@ class GenSelect(discord.ui.Select):
         embed.set_footer(text=f"Stock restant : {remaining_count} comptes")
 
         view = AccountCopyView(service_name, email, password, account, remaining_count)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 class GenView(discord.ui.View):
     def __init__(self, user: discord.Member = None):
@@ -894,6 +897,7 @@ async def slash_cm_pm(interaction: discord.Interaction, cm: discord.Member, cool
     )
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+# Liste complète des choix de services pour restock / delstock
 RESTOCK_CHOICES = [
     app_commands.Choice(name="Eldorado", value="eldorado"),
     app_commands.Choice(name="Eneba", value="eneba"),
