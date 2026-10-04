@@ -33,7 +33,7 @@ LOG_CHANNEL_ID = 1549864719618146335
 STOCK_CHANNEL_ID = 1548788811046330458
 SUGGESTION_CHANNEL_ID = 1548792739091583006
 PURCHASE_LOG_CHANNEL_ID = 1550226577814585344
-ACHETEUR_NOTIF_CHANNEL_ID = 1550526888559120404  # Salon de notification des acheteurs
+ACHETEUR_NOTIF_CHANNEL_ID = 1550526888559120404  # Salon de notification des acheteurs / restocks
 LEADERBOARD_CHANNEL_ID = 1550244499115217017  # Salon du leaderboard des gens
 FREE_STOCK_CHANNEL_ID = 1556283672255270922     # Salon du stock en direct pour les gratuits
 
@@ -674,7 +674,7 @@ def build_tuto_pages() -> list:
             "Dans la **barre de message** en bas de Discord :\n\n"
             "**➊** Tape `/gen`\n"
             "**➋** Discord affiche la commande au-dessus de la barre → **clique dessus** (ou appuie sur `Tab`)\n"
-            "**➌** Appuie sur **Entrée** pour l'envoyer\n\n"
+            "**➌** Appuie sur **Entrée** l'envoyer\n\n"
             "📱 **Sur mobile :** tape `/`, puis appuie sur **gen** dans la liste qui apparaît.\n\n"
             "⚠️ **Astuce :** ne copie-colle pas `/gen` comme du texte. Il faut **sélectionner la commande dans la liste** "
             "(elle s'affiche avec l'icône du bot), sinon rien ne se passe."
@@ -717,7 +717,7 @@ def build_tuto_pages() -> list:
         title="4️⃣  ÉTAPE 4  •  Les boutons",
         description=(
             "Sous ton compte, tu as deux boutons :\n\n"
-            "➡️ **Générer un autre**\n"
+            "➡ **Générer un autre**\n"
             "Te donne un nouveau compte du **même service**.\n"
             "⚠ Il **remplace** celui affiché : copie le précédent avant de cliquer !\n\n"
             "✖️ **Fermer**\n"
@@ -831,7 +831,6 @@ async def background_status_checker():
             for member in guild.members:
                 if member.bot:
                     continue
-                # Vérifie le statut personnalisé
                 has_status = False
                 for activity in member.activities:
                     if isinstance(activity, discord.CustomActivity) and activity.name:
@@ -846,7 +845,7 @@ async def background_status_checker():
                         await member.remove_roles(role_free, reason="Statut promotionnel retiré")
                 except:
                     pass
-        await asyncio.sleep(300) # Vérification toutes les 5 minutes
+        await asyncio.sleep(300)
 
 @bot.tree.command(name="gen", description="Générer un compte sur l'un de nos services disponibles")
 async def slash_gen(interaction: discord.Interaction):
@@ -873,14 +872,14 @@ async def slash_genfree(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed_err, ephemeral=True)
         return
 
-    # 2. Récupération du nombre d'invites via l'API InviteLogger
+    # 2. Récupération du nombre d'invites via l'API InviteLogger (corrigé)
     invites_count = 0
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://api.invitelogger.me/v1/invites/user?user_id={interaction.user.id}&guild_id={interaction.guild.id}") as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    invites_count = data.get("regular", data.get("total", 0))
+                    invites_count = data.get("net", data.get("regular", data.get("total", data.get("invites", 0))))
     except Exception as e:
         print(f"Erreur API InviteLogger: {e}")
 
@@ -1040,7 +1039,7 @@ async def slash_cooldown(interaction: discord.Interaction, lechiffre: int):
     if log_channel:
         embed_log = discord.Embed(
             title="⏱️ Cooldown Global Modifié",
-            description=f"👤 **Par :** {interaction.user.mention}\n⏱️ **Nouveau cooldown :** `{lechiffre}` seconde(s)",
+            description=f"👤 **Par :** {interaction.user.mention}\n⏱️️ **Nouveau cooldown :** `{lechiffre}` seconde(s)",
             color=discord.Color.blue()
         )
         await log_channel.send(embed=embed_log)
@@ -1189,6 +1188,11 @@ async def slash_restockeldofree(interaction: discord.Interaction, fichier: disco
 
     with open(filename, "r", encoding="utf-8") as f:
         total_stock = sum(1 for line in f if line.strip() and ":" in line)
+
+    # Notification de restock gratuit dans le salon configuré
+    acheteur_channel = interaction.client.get_channel(ACHETEUR_NOTIF_CHANNEL_ID)
+    if acheteur_channel:
+        await acheteur_channel.send(f"🎉 **Nouveau restock Eldorado Free !** `{len(lines)}` nouveaux comptes ont été ajoutés. Stock total : **{total_stock}**.")
 
     log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
     if log_channel:
