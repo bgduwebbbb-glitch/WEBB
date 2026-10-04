@@ -872,14 +872,14 @@ async def slash_genfree(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed_err, ephemeral=True)
         return
 
-    # 2. Récupération du nombre d'invites via l'API InviteLogger (corrigé)
+    # 2. Récupération du nombre d'invites via l'API InviteLogger (corrigé avec 'real' / 'total')
     invites_count = 0
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://api.invitelogger.me/v1/invites/user?user_id={interaction.user.id}&guild_id={interaction.guild.id}") as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    invites_count = data.get("net", data.get("regular", data.get("total", data.get("invites", 0))))
+                    invites_count = data.get("real", data.get("total", data.get("net", 0)))
     except Exception as e:
         print(f"Erreur API InviteLogger: {e}")
 
@@ -1039,7 +1039,7 @@ async def slash_cooldown(interaction: discord.Interaction, lechiffre: int):
     if log_channel:
         embed_log = discord.Embed(
             title="⏱️ Cooldown Global Modifié",
-            description=f"👤 **Par :** {interaction.user.mention}\n⏱️️ **Nouveau cooldown :** `{lechiffre}` seconde(s)",
+            description=f"👤 **Par :** {interaction.user.mention}\n⏱ **Nouveau cooldown :** `{lechiffre}` seconde(s)",
             color=discord.Color.blue()
         )
         await log_channel.send(embed=embed_log)
