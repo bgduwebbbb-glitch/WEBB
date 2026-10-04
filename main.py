@@ -880,7 +880,6 @@ async def slash_genfree(interaction: discord.Interaction):
             async with session.get(f"https://api.invitelogger.me/v1/invites/user?user_id={interaction.user.id}&guild_id={interaction.guild.id}") as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # Adaptez la clé selon le format exact renvoyé par l'API (ex: 'regular', 'total', etc.)
                     invites_count = data.get("regular", data.get("total", 0))
     except Exception as e:
         print(f"Erreur API InviteLogger: {e}")
@@ -901,7 +900,7 @@ async def slash_genfree(interaction: discord.Interaction):
 
     cooldown_seconds = cooldown_minutes * 60
     current_time = time.time()
-    last_gen_time = free_net_cooldowns = free_gen_cooldowns.get(interaction.user.id, 0) if 'free_gen_cooldowns' in globals() else 0
+    last_gen_time = free_gen_cooldowns.get(interaction.user.id, 0)
 
     if current_time - last_gen_time < cooldown_seconds:
         remaining_sec = int(cooldown_seconds - (current_time - last_gen_time))
