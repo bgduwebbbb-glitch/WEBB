@@ -35,10 +35,12 @@ SUGGESTION_CHANNEL_ID = 1548792739091583006
 PURCHASE_LOG_CHANNEL_ID = 1550226577814585344
 ACHETEUR_NOTIF_CHANNEL_ID = 1550526888559120404  # Salon de notification des acheteurs
 LEADERBOARD_CHANNEL_ID = 1550244499115217017  # Salon du leaderboard des gens
+FREE_STOCK_CHANNEL_ID = 1556283672255270922     # Salon du stock en direct pour les gratuits
 
 # IDs des rôles
 ROLE_ACHETEUR = 1548788762992185556  # Rôle Acheteur
 ROLE_CM = 1550248011085512705         # Rôle CM
+ROLE_FREE_GEN = 1556275518196813886   # Rôle donné via le statut .gg/k4lyxgen best gen eldorado
 
 # URL d'achat du produit
 URL_ACHAT = "https://k4lyx-gen.mysellauth.com/product/gen-account"
@@ -49,6 +51,7 @@ CM_PERMS_FILE = "cm_perms.json"
 
 # Stockage des statistiques EN MÉMOIRE (depuis le lancement du bot)
 gen_stats = {}
+free_gen_cooldowns = {}
 
 # Clé API SellAuth
 SELLAUTH_API_KEY = os.getenv("SELLAUTH_API_KEY")
@@ -225,6 +228,41 @@ async def update_live_stock(client: discord.Client):
             return
             
     await stock_channel.send(embed=embed)
+
+# --- MISE À JOUR DU STOCK GRATUIT (ELDORADO FREE) ---
+async def update_live_free_stock(client: discord.Client):
+    free_stock_channel = client.get_channel(FREE_STOCK_CHANNEL_ID)
+    if not free_stock_channel:
+        return
+
+    filename = "stock_eldorado_free.txt"
+    count = 0
+    if os.path.exists(filename):
+        with open(filename, "r", encoding="utf-8") as f:
+            count = sum(1 for line in f if line.strip() and ":" in line)
+
+    status_icon = "🟢" if count > 0 else "🔴"
+
+    embed = discord.Embed(
+        title="🆓 ─── [ 📦 LIVE ELDORADO FREE STOCK ] ─── 🆓",
+        description="Bienvenue sur le stock gratuit Eldorado !\nMettez le statut `.gg/k4lyxgen best gen eldorado` pour y accéder.\n\n━━━━━━━━━━━━━━━━━━━━━━",
+        color=discord.Color.from_rgb(0, 255, 128)
+    )
+
+    embed.add_field(
+        name="📊 **DISPONIBILITÉ**",
+        value=f"{status_icon} **Eldorado Free** ➔ `{count}` disponible(s)",
+        inline=False
+    )
+
+    embed.set_footer(text="✨ Système gratuit • Restock automatique", icon_url="https://cdn-icons-png.flaticon.com/512/10313/10313217.png")
+
+    async for message in free_stock_channel.history(limit=10):
+        if message.author == client.user and message.embeds and "LIVE ELDORADO FREE STOCK" in message.embeds[0].title:
+            await message.edit(embed=embed)
+            return
+            
+    await free_stock_channel.send(embed=embed)
 
 # --- MISE À JOUR DU LEADERBOARD EN LIVE ---
 async def update_live_leaderboard(client: discord.Client):
@@ -681,7 +719,7 @@ def build_tuto_pages() -> list:
             "Sous ton compte, tu as deux boutons :\n\n"
             "➡️ **Générer un autre**\n"
             "Te donne un nouveau compte du **même service**.\n"
-            "⚠️️ Il **remplace** celui affiché : copie le précédent avant de cliquer !\n\n"
+            "⚠ Il **remplace** celui affiché : copie le précédent avant de cliquer !\n\n"
             "✖️ **Fermer**\n"
             "Ferme la fenêtre quand tu as terminé.\n\n"
             "⏳ Les boutons restent actifs **3 minutes**. Passé ce délai, refais simplement `/gen`.\n\n"
@@ -774,12 +812,41 @@ bot = MyBot()
 async def on_ready():
     print(f"Connecté avec succès en tant que {bot.user} !")
     bot.loop.create_task(background_leaderboard_update())
+    bot.loop.create_task(background_status_checker())
 
 async def background_leaderboard_update():
     await bot.wait_until_ready()
     while not bot.is_closed():
         await update_live_leaderboard(bot)
         await asyncio.sleep(60)
+
+async def background_status_checker():
+    """Vérifie régulièrement le statut des membres pour attribuer ou retirer le rôle gratuit"""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in bot.guilds:
+            role_free = guild.get_role(ROLE_FREE_GEN)
+            if not role_free:
+                continue
+            for member in guild.members:
+                if member.bot:
+                    continue
+                # Vérifie le statut personnalisé
+                has_status = False
+                for activity in member.activities:
+                    if isinstance(activity, discord.CustomActivity) and activity.name:
+                        if ".gg/k4lyxgen best gen eldorado" in activity.name.lower():
+                            has_status = True
+                            break
+                
+                try:
+                    if has_status and role_free not in member.roles:
+                        await member.add_roles(role_free, reason="Statut promotionnel .gg/k4lyxgen mis en place")
+                    elif not has_status and role_free in member.roles:
+                        await member.remove_roles(role_free, reason="Statut promotionnel retiré")
+                except:
+                    pass
+        await asyncio.sleep(300) # Vérification toutes les 5 minutes
 
 @bot.tree.command(name="gen", description="Générer un compte sur l'un de nos services disponibles")
 async def slash_gen(interaction: discord.Interaction):
@@ -790,6 +857,118 @@ async def slash_gen(interaction: discord.Interaction):
     )
     view = GenView(interaction.user if isinstance(interaction.user, discord.Member) else None)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+
+@bot.tree.command(name="genfree", description="Générer un compte Eldorado gratuit (nécessite le statut et le rôle associé)")
+async def slash_genfree(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # 1. Vérification du rôle gratuit
+    role_free = interaction.guild.get_role(ROLE_FREE_GEN)
+    if not role_free or role_free not in interaction.user.roles:
+        embed_err = discord.Embed(
+            title="❌ Accès Refusé",
+            description=f"Vous devez mettre le statut **.gg/k4lyxgen best gen eldorado** sur votre profil pour obtenir automatiquement le rôle <@&{ROLE_FREE_GEN}> et accéder au générateur gratuit !",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed_err, ephemeral=True)
+        return
+
+    # 2. Récupération du nombre d'invites via l'API InviteLogger
+    invites_count = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.invitelogger.me/v1/invites/user?user_id={interaction.user.id}&guild_id={interaction.guild.id}") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # Adaptez la clé selon le format exact renvoyé par l'API (ex: 'regular', 'total', etc.)
+                    invites_count = data.get("regular", data.get("total", 0))
+    except Exception as e:
+        print(f"Erreur API InviteLogger: {e}")
+
+    # 3. Calcul du cooldown basé sur les invites
+    if invites_count >= 5:
+        cooldown_minutes = 23
+    elif invites_count == 4:
+        cooldown_minutes = 25
+    elif invites_count == 3:
+        cooldown_minutes = 30
+    elif invites_count == 2:
+        cooldown_minutes = 35
+    elif invites_count == 1:
+        cooldown_minutes = 45
+    else:
+        cooldown_minutes = 60
+
+    cooldown_seconds = cooldown_minutes * 60
+    current_time = time.time()
+    last_gen_time = free_net_cooldowns = free_gen_cooldowns.get(interaction.user.id, 0) if 'free_gen_cooldowns' in globals() else 0
+
+    if current_time - last_gen_time < cooldown_seconds:
+        remaining_sec = int(cooldown_seconds - (current_time - last_gen_time))
+        rem_min = remaining_sec // 60
+        rem_sec = remaining_sec % 60
+
+        view = discord.ui.View()
+        button_pay = discord.ui.Button(
+            label="Passer au Premium sans Cooldown",
+            url=URL_ACHAT,
+            style=discord.ButtonStyle.link,
+            emoji="💎"
+        )
+        view.add_item(button_pay)
+
+        embed_cd = discord.Embed(
+            title="⏳ Cooldown Actif (Version Gratuite)",
+            description=(
+                f"Vous devez encore patienter **{rem_min}m {rem_sec}s** avant votre prochaine génération gratuite.\n\n"
+                f"📊 **Vos invites actuelles :** `{invites_count}` (Cooldown actuel : `{cooldown_minutes} minutes`)\n"
+                f"💡 *Invitez plus de membres pour réduire votre cooldown jusqu'à 23 minutes !*\n\n"
+                f"🚀 **Envie de générer sans attente ?** Achetez un accès illimité !"
+            ),
+            color=discord.Color.orange()
+        )
+        await interaction.followup.send(embed=embed_cd, view=view, ephemeral=True)
+        return
+
+    # 4. Distribution du compte Eldorado Free
+    filename = "stock_eldorado_free.txt"
+    if not os.path.exists(filename):
+        await interaction.followup.send("❌ Le stock gratuit d'Eldorado est actuellement vide.", ephemeral=True)
+        return
+
+    with open(filename, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f.readlines() if line.strip() and ":" in line]
+
+    if not lines:
+        await interaction.followup.send("❌ Le stock gratuit d'Eldorado est épuisé !", ephemeral=True)
+        await update_live_free_stock(interaction.client)
+        return
+
+    account = lines[0]
+    separator_index = account.find(":")
+    email = account[:separator_index]
+    password = account[separator_index + 1:]
+
+    with open(filename, "w", encoding="utf-8") as f:
+        for line in lines[1:]:
+            f.write(line + "\n")
+
+    free_gen_cooldowns[interaction.user.id] = current_time
+    await update_live_free_stock(interaction.client)
+
+    remaining_count = len(lines) - 1
+
+    embed = discord.Embed(
+        title="🎁 Compte Eldorado (Free) Généré !",
+        description="Voici vos identifiants gratuits :",
+        color=discord.Color.from_rgb(0, 255, 128)
+    )
+    embed.add_field(name="📧 Email", value=f"```text\n{email}\n```", inline=False)
+    embed.add_field(name="🔑 Mot de passe", value=f"```text\n{password}\n```", inline=False)
+    embed.add_field(name="📊 Vos Infos", value=f"Invites : `{invites_count}` | Cooldown appliqué : `{cooldown_minutes} min`", inline=False)
+    embed.set_footer(text=f"Stock restant : {remaining_count} comptes")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="leaderboard", description="Afficher le classement des membres qui ont le plus généré")
 async def slash_leaderboard(interaction: discord.Interaction):
@@ -974,6 +1153,58 @@ async def slash_restock(interaction: discord.Interaction, service: str, fichier:
     embed = discord.Embed(
         title="✅ Restock Réussi !",
         description=f"Service : **{formatted_name}**\nComptes ajoutés : `{len(lines)}`\n📦 Stock total : `{total_stock}`",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="restockeldofree", description="Ajouter un fichier texte pour restock automatiquement le service Eldorado Gratuit")
+@app_commands.describe(fichier="Glisse ton fichier .txt contenant les comptes Eldorado Free (user:pass)")
+async def slash_restockeldofree(interaction: discord.Interaction, fichier: discord.Attachment):
+    if not is_owner_user(interaction):
+        await interaction.response.send_message("❌ Réservé aux administrateurs.", ephemeral=True)
+        return
+
+    if not fichier.filename.endswith(".txt"):
+        await interaction.response.send_message("❌ Le fichier doit obligatoirement être au format `.txt`.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        file_bytes = await fichier.read()
+        content = file_bytes.decode("utf-8", errors="ignore")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erreur lors de la lecture du fichier : {e}", ephemeral=True)
+        return
+
+    lines = [line.strip() for line in content.splitlines() if ":" in line and line.strip()]
+
+    if not lines:
+        await interaction.followup.send("❌ Aucun compte valide trouvé dans ce fichier.", ephemeral=True)
+        return
+
+    filename = "stock_eldorado_free.txt"
+    with open(filename, "a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line + "\n")
+
+    with open(filename, "r", encoding="utf-8") as f:
+        total_stock = sum(1 for line in f if line.strip() and ":" in line)
+
+    log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        embed_log = discord.Embed(
+            title="📥 Restock Eldorado Free Enregistré",
+            description=f"👤 **Par :** {interaction.user.mention}\n📦 **Service :** `Eldorado (Free)`\n➕ **Ajoutés :** `{len(lines)}`\n📈 **Total :** `{total_stock}`",
+            color=discord.Color.green()
+        )
+        await log_channel.send(embed=embed_log)
+
+    await update_live_free_stock(interaction.client)
+
+    embed = discord.Embed(
+        title="✅ Restock Eldorado Free Réussi !",
+        description=f"Comptes ajoutés : `{len(lines)}`\n📦 Stock total : `{total_stock}`",
         color=discord.Color.green()
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
